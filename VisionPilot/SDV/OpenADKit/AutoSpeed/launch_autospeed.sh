@@ -6,5 +6,5 @@ docker run -it --rm \
     -v "$PWD"/model-weights:/autoware/model-weights \
     -v "$PWD"/launch:/autoware/launch \
     -v "$PWD"/../Test:/autoware/test \
-    visionpilot \
+    ghcr.io/oguzkaganozt/visionpilot:latest \
     /autoware/launch/run_objectFinder.sh
