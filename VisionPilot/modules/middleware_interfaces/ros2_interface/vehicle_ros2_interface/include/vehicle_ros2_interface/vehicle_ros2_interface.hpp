@@ -3,6 +3,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/float64.hpp>
+#include <nav_msgs/msg/path.hpp>
 #include <thread>
 #include <atomic>
 #include <functional>
@@ -15,6 +16,7 @@
 //
 //  Publish    /vehicle/steering_cmd    Float64   tyre angle (rad)
 //             /vehicle/throttle_cmd   Float64   acceleration (m/s²)
+//             /vehicle/lane_path      nav_msgs/Path  fused lane center (base_link)
 //
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -32,6 +34,13 @@ public:
     // Publish tyre angle (rad) and acceleration (m/s²) to ROS2.
     void write(double steering, double acceleration) override;
 
+    void publish_lane_path(
+        bool valid,
+        float path_a,
+        float path_b,
+        float path_c,
+        float path_x_max_m) override;
+
 private:
     // Inner node — owns all ROS 2 concerns
     class VehicleRos2Node : public rclcpp::Node
@@ -46,6 +55,7 @@ private:
         rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr sub_;
         rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr steering_pub_;
         rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr throttle_pub_;
+        rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
     };
 
     std::shared_ptr<VehicleRos2Node> node_;

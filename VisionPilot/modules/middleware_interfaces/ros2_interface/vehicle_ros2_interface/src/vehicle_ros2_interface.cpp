@@ -1,4 +1,6 @@
+#include <cmath>
 #include <string>
+#include <geometry_msgs/msg/pose_stamped.hpp>
 #include <vehicle_ros2_interface/vehicle_ros2_interface.hpp>
 
 // ── VehicleRos2Node ───────────────────────────────────────────────────────────
@@ -23,11 +25,13 @@ VehicleRos2Interface::VehicleRos2Node::VehicleRos2Node(
 
     steering_pub_ = create_publisher<std_msgs::msg::Float64>(vehicle_steering_topic, cmd_qos);
     throttle_pub_ = create_publisher<std_msgs::msg::Float64>(vehicle_acceleration_topic, cmd_qos);
+    path_pub_ = create_publisher<nav_msgs::msg::Path>("/vehicle/lane_path", cmd_qos);
 
     RCLCPP_INFO(get_logger(), "VehicleRos2Interface ready");
     RCLCPP_INFO(get_logger(), "  sub  /vehicle/speed");
     RCLCPP_INFO(get_logger(), "  pub  /vehicle/steering_cmd");
     RCLCPP_INFO(get_logger(), "  pub  /vehicle/throttle_cmd");
+    RCLCPP_INFO(get_logger(), "  pub  /vehicle/lane_path");
 }
 
 // ── VehicleRos2Interface ──────────────────────────────────────────────────────
@@ -66,4 +70,37 @@ void VehicleRos2Interface::write(const double steering, const double acceleratio
     std_msgs::msg::Float64 throttle_msg;
     throttle_msg.data = acceleration;
     node_->throttle_pub_->publish(throttle_msg);
+}
+
+void VehicleRos2Interface::publish_lane_path(
+    const bool valid,
+    const float path_a,
+    const float path_b,
+    const float path_c,
+    const float path_x_max_m)
+{
+    nav_msgs::msg::Path path;
+    path.header.frame_id = "base_link";
+    path.header.stamp = node_->now();
+    if (valid)
+    {
+        float x_max = path_x_max_m;
+        if (x_max < 10.0f) x_max = 40.0f;
+        if (x_max > 60.0f) x_max = 60.0f;
+        constexpr float kSpacing = 1.0f;
+        for (float x = 0.0f; x <= x_max + 1e-3f; x += kSpacing)
+        {
+            const float y = path_a * x * x + path_b * x + path_c;
+            const float yaw = std::atan(2.0f * path_a * x + path_b);
+            const float half = 0.5f * yaw;
+            geometry_msgs::msg::PoseStamped pose;
+            pose.header = path.header;
+            pose.pose.position.x = x;
+            pose.pose.position.y = y;
+            pose.pose.orientation.z = std::sin(half);
+            pose.pose.orientation.w = std::cos(half);
+            path.poses.push_back(pose);
+        }
+    }
+    node_->path_pub_->publish(path);
 }

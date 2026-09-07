@@ -169,6 +169,12 @@ int main(int argc, char** argv)
             vehicle_interface->write(
                 plan.steering.empty() ? 0.0 : plan.steering[1],
                 plan.acceleration);
+            vehicle_interface->publish_lane_path(
+                r->lateral.path_valid,
+                r->lateral.path_a,
+                r->lateral.path_b,
+                r->lateral.path_c,
+                r->lateral.path_x_max_m);
             cv::Mat viz;  // output visualization image (empty when viz is off)
             if (cfg.visualization_on)
             {
