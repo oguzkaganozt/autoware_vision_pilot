@@ -51,6 +51,13 @@ struct CipoLatch
     static constexpr double LATCH_DIST_M   = 10.0;
     static constexpr double EGO_V_GATE_MPS = 2.0;  // approach flicker unaffected
     static constexpr int    RELEASE_FRAMES = 5;    // single-frame ghosts must not release
+    // While latched AND still rolling: the coasted gap may be optimistic
+    // (it inherits the last estimate's error), so never allow positive
+    // drive — brake gently until stopped, then let IDM creep/hold on the
+    // coast. Proven need 2026-09-11: latch held 8 m while rolling
+    // 1.5 m/s and IDM kept creeping into the bumper.
+    static constexpr double BLIND_ROLL_MAX_ACCEL = -1.0;  // m/s^2
+    static constexpr double ROLLING_MPS          = 0.5;
 
     double last_dist_m = 150.0;
     double odom_m      = 0.0;   // ego travel integral (self-contained)
@@ -226,8 +233,11 @@ int main(int argc, char** argv)
             const double raw_cte = r->lateral.path_valid
                                        ? static_cast<double>(r->lateral.raw_cte_m)
                                        : cte;
-            const Plan plan = planner.compute_plan(
+            Plan plan = planner.compute_plan(
                 cte, epsi, kappa, ego_v, has_cipo, cipo_v, cipo_dist);
+            if (cipo_latch.latched && ego_v > CipoLatch::ROLLING_MPS)
+                plan.acceleration = std::min(
+                    plan.acceleration, CipoLatch::BLIND_ROLL_MAX_ACCEL);
 
             VP_INFO(
                 "plan: tyre=%.4f rad  accel=%.3f m/s²  |  cte=%.2fm(raw=%.2fm) cte_dot=%+.2fm/s  epsi=%.3f epsi_dot=%+.3frad/s  kappa=%.4f  |  cipo=%s%s  dist=%.1f m  vel=%+.2f m/s",
