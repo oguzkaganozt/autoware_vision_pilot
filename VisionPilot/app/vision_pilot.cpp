@@ -41,32 +41,33 @@ namespace vd = visionpilot::debug;
 // contact at ~0 m true gap while fusion reported 150 m / has_cipo=false).
 //
 // Policy: a confirmed-close track (< LATCH_DIST_M) that vanishes while ego
-// is slow latches as a stopped lead until a network re-confirms. A lead
-// that genuinely drives away stays confirmed while visible, so the latch
-// follows it out and never fires; a close object that vanishes without a
-// trace while ego is stopped is ~always "too close to see". Holding
-// (annoyance) beats grinding into a bumper (collision).
+// is slow latches as a stopped lead. While latched the planner is fed the
+// latched world model — NEVER raw flicker: untrusted confirms neither
+// reach the planner nor rewrite memory. The reported gap is
+// min(coast, HOLD_DIST_M): at/inside the IDM standstill the planner
+// holds by itself (accel AND horizon come out consistent — clamping the
+// instantaneous accel alone was proven useless, motion flows through the
+// horizon). A lead that genuinely drives away stays confirmed while
+// visible, earns a trusted streak and releases; a close object that
+// vanishes without a trace while ego is stopped is ~always "too close
+// to see". Holding (annoyance) beats grinding into a bumper (collision).
 // Returns {has_cipo, cipo_dist_m, cipo_rel_vel_ms} for the planner contract.
 struct CipoLatch
 {
-    static constexpr double LATCH_DIST_M   = 10.0;
-    static constexpr double EGO_V_GATE_MPS = 3.0;  // fast cruise flicker unaffected
-    static constexpr int    RELEASE_FRAMES = 5;    // single-frame ghosts must not release
+    static constexpr double LATCH_DIST_M   = 15.0;
+    static constexpr double HOLD_DIST_M    = 2.0;   // <= IDM s0: planner holds by itself
+    static constexpr double EGO_V_GATE_MPS = 3.0;   // fast cruise flicker unaffected
+    static constexpr int    RELEASE_FRAMES = 5;     // single-frame ghosts must not release
     // A latch may only arm off a SOLID track: flickering ghosts (proven
     // 2026-09-11: 5 m phantom at spawn bricking the launch) confirm a
     // frame here and there but never N in a row, so they can neither arm
     // nor — via the release gate — disarm.
     static constexpr int    ARM_FRAMES     = 10;
-    // While latched AND still rolling: the coasted gap may be optimistic
-    // (it inherits the last estimate's error), so never allow positive
-    // drive — brake gently until stopped. While latched AND stopped: cap
-    // drive at +0.2 so the schedule stays under the actuation deadband
-    // (proven: a +1.3 creep demand grinds into the bumper; +0.2 stalls
-    // safe). Braking always passes through.
-    static constexpr double BLIND_ROLL_MAX_ACCEL = -1.0;  // m/s^2
-    static constexpr double BLIND_HOLD_MAX_ACCEL = 0.2;   // m/s^2
-    static constexpr double ROLLING_MPS          = 0.5;
-    static constexpr double JUMP_GATE_M          = 4.0;
+    static constexpr double JUMP_GATE_M    = 4.0;
+    // NOTE: earlier revisions clamped plan.acceleration while latched
+    // (-1.0 rolling / +0.2 stopped). Removed: motion flows through the
+    // speed horizon, which is integrated inside compute_plan from the
+    // (already shaped) input — output clamping never touched it.
 
     double last_dist_m = 150.0;
     double odom_m      = 0.0;   // ego travel integral (self-contained)
@@ -101,13 +102,18 @@ struct CipoLatch
                 last_dist_m  = fused_dist_m;
                 latch_odom_m = odom_m;
             }
-            if (trusted && latched)
+            if (trusted && plausible && latched)
             {
                 latched = false;
                 VP_INFO("[CIPO-latch] released — target re-confirmed at %.1f m", fused_dist_m);
             }
-            // A fresh confirm always wins for the planner; the streak only
-            // gates the latch *release* so flicker cannot drop the coast.
+            if (latched)
+            {
+                // Hold the latched world model through flicker: untrusted
+                // confirms must not reach the planner for even one frame
+                // (a +1.5 blip schedules a launch the pipeline executes).
+                return latched_output(ego_v);
+            }
             return {true, fused_dist_m, fused_rel_vel_ms};
         }
         const bool was_solid = (confirm_streak >= ARM_FRAMES);
@@ -119,13 +125,22 @@ struct CipoLatch
                 latched = true;
                 VP_INFO("[CIPO-latch] engaged — holding stopped lead at %.1f m", last_dist_m);
             }
-            // Coast: the car may still be rolling when the track drops, so
-            // freeze the *world* point, not the last number — subtract ego
-            // travel since the confirm. Floors at 0.5 m (IDM gap floor).
-            const double coasted = std::max(0.5, last_dist_m - (odom_m - latch_odom_m));
-            return {true, coasted, -ego_v};  // stopped lead: absolute speed 0
         }
+        if (latched)
+            return latched_output(ego_v);
         return {false, fused_dist_m, fused_rel_vel_ms};
+    }
+
+    // World model while latched: the coasted gap, capped at the IDM
+    // standstill so the planner holds by itself (accel and horizon agree;
+    // no per-output clamping needed downstream).
+    std::tuple<bool, double, double> latched_output(double ego_v) const
+    {
+        // Coast: the car may still be rolling when the track drops, so
+        // freeze the *world* point, not the last number — subtract ego
+        // travel since the confirm. Floors at 0.5 m (IDM gap floor).
+        const double coasted = std::max(0.5, last_dist_m - (odom_m - latch_odom_m));
+        return {true, std::min(coasted, HOLD_DIST_M), -ego_v};  // stopped lead
     }
 };
 
@@ -256,14 +271,13 @@ int main(int argc, char** argv)
             const double raw_cte = r->lateral.path_valid
                                        ? static_cast<double>(r->lateral.raw_cte_m)
                                        : cte;
-            Plan plan = planner.compute_plan(
+            // NOTE: no output clamping here on purpose. While latched the
+            // planner input is already the hold model (<=2 m), so accel
+            // AND horizon come out consistent. Clamping the instantaneous
+            // accel alone was proven useless: motion flows through the
+            // horizon, which is integrated inside compute_plan.
+            const Plan plan = planner.compute_plan(
                 cte, epsi, kappa, ego_v, has_cipo, cipo_v, cipo_dist);
-            if (cipo_latch.latched)
-                plan.acceleration = std::min(
-                    plan.acceleration,
-                    ego_v > CipoLatch::ROLLING_MPS
-                        ? CipoLatch::BLIND_ROLL_MAX_ACCEL
-                        : CipoLatch::BLIND_HOLD_MAX_ACCEL);
 
             VP_INFO(
                 "plan: tyre=%.4f rad  accel=%.3f m/s²  |  cte=%.2fm(raw=%.2fm) cte_dot=%+.2fm/s  epsi=%.3f epsi_dot=%+.3frad/s  kappa=%.4f  |  cipo=%s%s  dist=%.1f m  vel=%+.2f m/s",
