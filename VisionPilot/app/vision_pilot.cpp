@@ -174,6 +174,7 @@ int main(int argc, char** argv)
             vehicle_interface->write(
                 plan.steering.empty() ? 0.0 : plan.steering[1],
                 plan.acceleration);
+            vehicle_interface->publish_speed_horizon(plan.speed_horizon);
             vehicle_interface->publish_lane_path(
                 r->lateral.path_valid,
                 r->lateral.path_a,

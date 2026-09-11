@@ -1,6 +1,8 @@
 #include <cmath>
 #include <string>
+#include <vector>
 #include <geometry_msgs/msg/pose_stamped.hpp>
+#include <std_msgs/msg/float32_multi_array.hpp>
 #include <vehicle_ros2_interface/vehicle_ros2_interface.hpp>
 
 // ── VehicleRos2Node ───────────────────────────────────────────────────────────
@@ -26,12 +28,15 @@ VehicleRos2Interface::VehicleRos2Node::VehicleRos2Node(
     steering_pub_ = create_publisher<std_msgs::msg::Float64>(vehicle_steering_topic, cmd_qos);
     throttle_pub_ = create_publisher<std_msgs::msg::Float64>(vehicle_acceleration_topic, cmd_qos);
     path_pub_ = create_publisher<nav_msgs::msg::Path>("/vehicle/lane_path", cmd_qos);
+    speed_horizon_pub_ = create_publisher<std_msgs::msg::Float32MultiArray>(
+        "/vehicle/speed_horizon", cmd_qos);
 
     RCLCPP_INFO(get_logger(), "VehicleRos2Interface ready");
     RCLCPP_INFO(get_logger(), "  sub  /vehicle/speed");
     RCLCPP_INFO(get_logger(), "  pub  /vehicle/steering_cmd");
     RCLCPP_INFO(get_logger(), "  pub  /vehicle/throttle_cmd");
     RCLCPP_INFO(get_logger(), "  pub  /vehicle/lane_path");
+    RCLCPP_INFO(get_logger(), "  pub  /vehicle/speed_horizon");
 }
 
 // ── VehicleRos2Interface ──────────────────────────────────────────────────────
@@ -103,4 +108,15 @@ void VehicleRos2Interface::publish_lane_path(
         }
     }
     node_->path_pub_->publish(path);
+}
+
+void VehicleRos2Interface::publish_speed_horizon(const std::vector<double>& speeds)
+{
+    std_msgs::msg::Float32MultiArray msg;
+    msg.data.reserve(speeds.size());
+    for (double v : speeds)
+    {
+        msg.data.push_back(static_cast<float>(v));
+    }
+    node_->speed_horizon_pub_->publish(msg);
 }

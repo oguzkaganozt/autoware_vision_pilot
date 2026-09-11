@@ -120,5 +120,6 @@ Plan Planner::compute_plan(
         warnings.push_back(Warning::AEB);
     }
 
-    return {acceleration, steering, warnings};
+    std::vector<double> speed_horizon(v_schedule.data(), v_schedule.data() + v_schedule.size());
+    return {acceleration, steering, speed_horizon, warnings};
 }

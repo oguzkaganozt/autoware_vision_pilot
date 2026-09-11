@@ -3,6 +3,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/float64.hpp>
+#include <std_msgs/msg/float32_multi_array.hpp>
 #include <nav_msgs/msg/path.hpp>
 #include <thread>
 #include <atomic>
@@ -17,6 +18,7 @@
 //  Publish    /vehicle/steering_cmd    Float64   tyre angle (rad)
 //             /vehicle/throttle_cmd   Float64   acceleration (m/s²)
 //             /vehicle/lane_path      nav_msgs/Path  fused lane center (base_link)
+//             /vehicle/speed_horizon  Float32MultiArray  native speed schedule (m/s, 0.05 s)
 //
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -41,6 +43,8 @@ public:
         float path_c,
         float path_x_max_m) override;
 
+    void publish_speed_horizon(const std::vector<double>& speeds) override;
+
 private:
     // Inner node — owns all ROS 2 concerns
     class VehicleRos2Node : public rclcpp::Node
@@ -56,6 +60,7 @@ private:
         rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr steering_pub_;
         rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr throttle_pub_;
         rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr path_pub_;
+        rclcpp::Publisher<std_msgs::msg::Float32MultiArray>::SharedPtr speed_horizon_pub_;
     };
 
     std::shared_ptr<VehicleRos2Node> node_;

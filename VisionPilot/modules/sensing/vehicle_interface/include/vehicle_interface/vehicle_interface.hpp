@@ -1,6 +1,7 @@
 #ifndef VISIONPILOT_VEHICLE_INTERFACE_HPP
 #define VISIONPILOT_VEHICLE_INTERFACE_HPP
 
+#include <vector>
 
 class VehicleInterface
 {
@@ -29,6 +30,12 @@ public:
         (void)path_b;
         (void)path_c;
         (void)path_x_max_m;
+    }
+
+    // Native speed schedule (m/s). Default no-op for CAN/file backends.
+    virtual void publish_speed_horizon(const std::vector<double>& speeds)
+    {
+        (void)speeds;
     }
 };
 
