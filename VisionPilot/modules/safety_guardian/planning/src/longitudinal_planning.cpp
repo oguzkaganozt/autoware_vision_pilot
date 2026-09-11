@@ -13,8 +13,9 @@ double LongitudinalPlanner::compute_acceleration(double kappa, double ego_v, boo
     double curv_v_max = std::sqrt(config_.mu * config_.g / std::abs(kappa));   // inf when kappa ~ 0, fine
     double speed_limit = std::min(config_.speed_limit, curv_v_max);
 
-    // Closing speed — negative when ego is slower than lead (gap opening)
-    double delta_v = cipo_v; // cipo_v relative CIPO vehicle sppeed
+    // IDM approach rate, derived from the ABSOLUTE lead speed contract:
+    // positive when closing (ego faster), negative when opening.
+    double delta_v = ego_v - cipo_v;
 
     // Wrap the dynamic term in max(0, …).
     // Without this, when v < lead_v, delta_v < 0 making dynamic_term

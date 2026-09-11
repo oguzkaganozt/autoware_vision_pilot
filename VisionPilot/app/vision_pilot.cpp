@@ -3,6 +3,7 @@
 #include <memory>
 #include <string>
 #include <thread>
+#include <algorithm>
 
 #include <config/vision_pilot_config.hpp>
 #include <common/utils.hpp>
@@ -143,7 +144,11 @@ int main(int argc, char** argv)
             // closer than D_MAX. cipo_raw_found alone must not gate the planner.
             static constexpr double D_MAX = 150.0;
             const bool has_cipo = r->cipo.valid && r->cipo.distance_m < D_MAX;
-            const double cipo_v = has_cipo ? r->cipo.velocity_ms : cfg.speed_limit;
+            // CONTRACT: cipo_v is the ABSOLUTE lead speed (m/s). Fusion reports
+            // RELATIVE velocity (negative = approaching), so convert at the
+            // boundary. speed_limit doubles as the free-road absolute value.
+            const double cipo_v = has_cipo ? std::max(0.0, ego_v + r->cipo.velocity_ms)
+                                         : cfg.speed_limit;
             const double cipo_dist = r->cipo.distance_m;
 
             const double raw_cte = r->lateral.path_valid

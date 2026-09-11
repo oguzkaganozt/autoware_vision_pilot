@@ -22,7 +22,9 @@ public:
     //
     //   ego_v         : ego speed (m/s)
     //   has_cipo      : CIPO in front
-    //   cipo_v        : lead-vehicle speed (m/s); set to speed_limit for free road
+    //   cipo_v        : ABSOLUTE lead-vehicle speed (m/s); speed_limit for free
+    //                   road. The IDM approach rate (ego_v - cipo_v) is derived
+    //                   inside; callers must NOT pass relative velocity.
     //   cipo_distance : bumper-to-bumper gap (m); use 9999.0 for free road
     double compute_acceleration(double kappa, double ego_v, bool has_cipo, double cipo_v, double cipo_distance);
 
