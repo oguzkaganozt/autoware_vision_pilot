@@ -51,6 +51,11 @@ struct CipoLatch
     static constexpr double LATCH_DIST_M   = 10.0;
     static constexpr double EGO_V_GATE_MPS = 2.0;  // approach flicker unaffected
     static constexpr int    RELEASE_FRAMES = 5;    // single-frame ghosts must not release
+    // A latch may only arm off a SOLID track: flickering ghosts (proven
+    // 2026-09-11: 5 m phantom at spawn bricking the launch) confirm a
+    // frame here and there but never N in a row, so they can neither arm
+    // nor — via the release gate — disarm.
+    static constexpr int    ARM_FRAMES     = 10;
     // While latched AND still rolling: the coasted gap may be optimistic
     // (it inherits the last estimate's error), so never allow positive
     // drive — brake gently until stopped, then let IDM creep/hold on the
@@ -79,7 +84,8 @@ struct CipoLatch
         {
             last_dist_m   = fused_dist_m;
             latch_odom_m  = odom_m;
-            if (++confirm_streak >= RELEASE_FRAMES && latched)
+            ++confirm_streak;
+            if (confirm_streak >= RELEASE_FRAMES && latched)
             {
                 latched = false;
                 VP_INFO("[CIPO-latch] released — target re-confirmed at %.1f m", fused_dist_m);
@@ -88,8 +94,9 @@ struct CipoLatch
             // gates the latch *release* so flicker cannot drop the coast.
             return {true, fused_dist_m, fused_rel_vel_ms};
         }
+        const bool was_solid = (confirm_streak >= ARM_FRAMES);
         confirm_streak = 0;
-        if (last_dist_m < LATCH_DIST_M && ego_v < EGO_V_GATE_MPS)
+        if (was_solid && last_dist_m < LATCH_DIST_M && ego_v < EGO_V_GATE_MPS)
         {
             if (!latched)
             {
