@@ -1,6 +1,7 @@
 // VisionPilot — preprocess → inference → fusion → display
 #include <chrono>
 #include <cmath>
+#include <deque>
 #include <memory>
 #include <string>
 #include <thread>
@@ -56,14 +57,26 @@ struct CipoLatch
 {
     static constexpr double LATCH_DIST_M   = 15.0;
     static constexpr double HOLD_DIST_M    = 2.0;   // <= IDM s0: planner holds by itself
-    static constexpr double EGO_V_GATE_MPS = 3.0;   // fast cruise flicker unaffected
+    // Inside REPORT_DIST_M the coast is replaced by the hold model: with
+    // a few metres of estimate error plus actuation lag, creeping on a
+    // coasted 5-8 m still contacts (proven 2026-09-11: 1.5 m/s impact
+    // under latch). Outside it the honest coast is reported (IDM cruises
+    // on far gaps exactly as on free road — no mission impact).
+    static constexpr double REPORT_DIST_M  = 8.0;
     static constexpr int    RELEASE_FRAMES = 5;     // single-frame ghosts must not release
-    // A latch may only arm off a SOLID track: flickering ghosts (proven
-    // 2026-09-11: 5 m phantom at spawn bricking the launch) confirm a
-    // frame here and there but never N in a row, so they can neither arm
-    // nor — via the release gate — disarm.
-    static constexpr int    ARM_FRAMES     = 10;
+    // A latch may only arm off a SOLID track, measured as a rate over a
+    // window — consecutive streaks proved too strict for flaky-but-real
+    // tracks (proven: 58 scattered confirms, never 10 in a row, no latch,
+    // 5 m/s impact) yet ghosts (1-2 frames per episode) still never arm.
+    static constexpr int    ARM_WINDOW     = 60;
+    static constexpr int    ARM_NEED       = 10;
     static constexpr double JUMP_GATE_M    = 4.0;
+    // Liveness bound: rolling 40 m under latch without a single confirm
+    // means the "lead" was a ghost (a real one is re-detected within
+    // metres of approach, or visibly departs and releases). Force free
+    // instead of holding forever. A true close lead stops the car within
+    // metres, so this never fires on a real hold.
+    static constexpr double TRAVEL_RELEASE_M = 40.0;
     // NOTE: earlier revisions clamped plan.acceleration while latched
     // (-1.0 rolling / +0.2 stopped). Removed: motion flows through the
     // speed horizon, which is integrated inside compute_plan from the
@@ -71,8 +84,11 @@ struct CipoLatch
 
     double last_dist_m = 150.0;
     double odom_m      = 0.0;   // ego travel integral (self-contained)
-    double latch_odom_m = 0.0;  // odom at last confirm
+    double latch_odom_m = 0.0;  // odom at last trusted confirm
+    double engage_odom_m = 0.0;
     int    confirm_streak = 0;
+    std::deque<char> window_;
+    int    window_trues_ = 0;
     bool   latched     = false;
     std::chrono::steady_clock::time_point last_t = std::chrono::steady_clock::now();
 
@@ -84,6 +100,14 @@ struct CipoLatch
         last_t = now;
         if (dt > 0.0 && dt < 1.0)
             odom_m += std::max(0.0, ego_v) * dt;
+
+        window_.push_back(fused_cipo ? 1 : 0);
+        window_trues_ += fused_cipo ? 1 : 0;
+        if (window_.size() > static_cast<std::size_t>(ARM_WINDOW))
+        {
+            window_trues_ -= window_.front();
+            window_.pop_front();
+        }
 
         if (fused_cipo)
         {
@@ -116,13 +140,22 @@ struct CipoLatch
             }
             return {true, fused_dist_m, fused_rel_vel_ms};
         }
-        const bool was_solid = (confirm_streak >= ARM_FRAMES);
         confirm_streak = 0;
-        if (was_solid && last_dist_m < LATCH_DIST_M && ego_v < EGO_V_GATE_MPS)
+        if (latched && (odom_m - engage_odom_m) > TRAVEL_RELEASE_M)
+        {
+            latched = false;
+            last_dist_m = 150.0;
+            VP_INFO("[CIPO-latch] released — rolled %.0f m with no re-confirm, trusting camera",
+                    TRAVEL_RELEASE_M);
+            return {false, fused_dist_m, fused_rel_vel_ms};
+        }
+        const bool was_solid = (window_trues_ >= ARM_NEED);
+        if (was_solid && last_dist_m < LATCH_DIST_M)
         {
             if (!latched)
             {
                 latched = true;
+                engage_odom_m = odom_m;
                 VP_INFO("[CIPO-latch] engaged — holding stopped lead at %.1f m", last_dist_m);
             }
         }
@@ -131,16 +164,19 @@ struct CipoLatch
         return {false, fused_dist_m, fused_rel_vel_ms};
     }
 
-    // World model while latched: the coasted gap, capped at the IDM
-    // standstill so the planner holds by itself (accel and horizon agree;
-    // no per-output clamping needed downstream).
+    // World model while latched: the honest coasted gap far away (IDM
+    // cruises on it exactly as on free road), the hold model inside
+    // REPORT_DIST_M so the planner stops by itself with accel and
+    // horizon in agreement.
     std::tuple<bool, double, double> latched_output(double ego_v) const
     {
         // Coast: the car may still be rolling when the track drops, so
         // freeze the *world* point, not the last number — subtract ego
         // travel since the confirm. Floors at 0.5 m (IDM gap floor).
         const double coasted = std::max(0.5, last_dist_m - (odom_m - latch_odom_m));
-        return {true, std::min(coasted, HOLD_DIST_M), -ego_v};  // stopped lead
+        const double reported = (coasted < REPORT_DIST_M)
+            ? std::min(coasted, HOLD_DIST_M) : coasted;
+        return {true, reported, -ego_v};  // stopped lead
     }
 };
 
