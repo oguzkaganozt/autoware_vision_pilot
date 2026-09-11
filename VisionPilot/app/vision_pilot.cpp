@@ -1,5 +1,6 @@
 // VisionPilot — preprocess → inference → fusion → display
 #include <chrono>
+#include <cmath>
 #include <memory>
 #include <string>
 #include <thread>
@@ -49,7 +50,7 @@ namespace vd = visionpilot::debug;
 struct CipoLatch
 {
     static constexpr double LATCH_DIST_M   = 10.0;
-    static constexpr double EGO_V_GATE_MPS = 2.0;  // approach flicker unaffected
+    static constexpr double EGO_V_GATE_MPS = 3.0;  // fast cruise flicker unaffected
     static constexpr int    RELEASE_FRAMES = 5;    // single-frame ghosts must not release
     // A latch may only arm off a SOLID track: flickering ghosts (proven
     // 2026-09-11: 5 m phantom at spawn bricking the launch) confirm a
@@ -58,11 +59,14 @@ struct CipoLatch
     static constexpr int    ARM_FRAMES     = 10;
     // While latched AND still rolling: the coasted gap may be optimistic
     // (it inherits the last estimate's error), so never allow positive
-    // drive — brake gently until stopped, then let IDM creep/hold on the
-    // coast. Proven need 2026-09-11: latch held 8 m while rolling
-    // 1.5 m/s and IDM kept creeping into the bumper.
+    // drive — brake gently until stopped. While latched AND stopped: cap
+    // drive at +0.2 so the schedule stays under the actuation deadband
+    // (proven: a +1.3 creep demand grinds into the bumper; +0.2 stalls
+    // safe). Braking always passes through.
     static constexpr double BLIND_ROLL_MAX_ACCEL = -1.0;  // m/s^2
+    static constexpr double BLIND_HOLD_MAX_ACCEL = 0.2;   // m/s^2
     static constexpr double ROLLING_MPS          = 0.5;
+    static constexpr double JUMP_GATE_M          = 4.0;
 
     double last_dist_m = 150.0;
     double odom_m      = 0.0;   // ego travel integral (self-contained)
@@ -82,10 +86,22 @@ struct CipoLatch
 
         if (fused_cipo)
         {
-            last_dist_m   = fused_dist_m;
-            latch_odom_m  = odom_m;
             ++confirm_streak;
-            if (confirm_streak >= RELEASE_FRAMES && latched)
+            const bool trusted = (confirm_streak >= RELEASE_FRAMES);
+            // Kinematic plausibility: at these speeds nothing moves 4 m
+            // in one frame. A far jump on a short memory is a ghost, not
+            // a departure (departures stay confirmed and walk out).
+            const bool plausible = (last_dist_m >= LATCH_DIST_M) ||
+                                   (std::fabs(fused_dist_m - last_dist_m) < JUMP_GATE_M);
+            if (trusted && plausible)
+            {
+                // Trusted track only: single-frame ghosts must neither
+                // release the latch nor rewrite its memory (proven: a
+                // phantom 11 m confirm poisoned last_dist into free-road).
+                last_dist_m  = fused_dist_m;
+                latch_odom_m = odom_m;
+            }
+            if (trusted && latched)
             {
                 latched = false;
                 VP_INFO("[CIPO-latch] released — target re-confirmed at %.1f m", fused_dist_m);
@@ -242,9 +258,12 @@ int main(int argc, char** argv)
                                        : cte;
             Plan plan = planner.compute_plan(
                 cte, epsi, kappa, ego_v, has_cipo, cipo_v, cipo_dist);
-            if (cipo_latch.latched && ego_v > CipoLatch::ROLLING_MPS)
+            if (cipo_latch.latched)
                 plan.acceleration = std::min(
-                    plan.acceleration, CipoLatch::BLIND_ROLL_MAX_ACCEL);
+                    plan.acceleration,
+                    ego_v > CipoLatch::ROLLING_MPS
+                        ? CipoLatch::BLIND_ROLL_MAX_ACCEL
+                        : CipoLatch::BLIND_HOLD_MAX_ACCEL);
 
             VP_INFO(
                 "plan: tyre=%.4f rad  accel=%.3f m/s²  |  cte=%.2fm(raw=%.2fm) cte_dot=%+.2fm/s  epsi=%.3f epsi_dot=%+.3frad/s  kappa=%.4f  |  cipo=%s%s  dist=%.1f m  vel=%+.2f m/s",
