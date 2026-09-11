@@ -4,6 +4,7 @@
 #include <string>
 #include <thread>
 #include <algorithm>
+#include <tuple>
 
 #include <config/vision_pilot_config.hpp>
 #include <common/utils.hpp>
@@ -30,6 +31,54 @@
 namespace ve = visionpilot::engine;
 namespace vm = visionpilot::models;
 namespace vd = visionpilot::debug;
+
+// ── Close-range CIPO latch (object permanence) ─────────────────────────────
+// Fusion reports free-road (150 m) whenever NEITHER network confirms a
+// target — including when a stopped lead sits centimeters away, too close
+// for either network to see (bumper fills the frame, bbox truncated).
+// Executing that as free-road drives into the bumper (proven 2026-09-11:
+// contact at ~0 m true gap while fusion reported 150 m / has_cipo=false).
+//
+// Policy: a confirmed-close track (< LATCH_DIST_M) that vanishes while ego
+// is slow latches as a stopped lead until a network re-confirms. A lead
+// that genuinely drives away stays confirmed while visible, so the latch
+// follows it out and never fires; a close object that vanishes without a
+// trace while ego is stopped is ~always "too close to see". Holding
+// (annoyance) beats grinding into a bumper (collision).
+// Returns {has_cipo, cipo_dist_m, cipo_rel_vel_ms} for the planner contract.
+struct CipoLatch
+{
+    static constexpr double LATCH_DIST_M   = 10.0;
+    static constexpr double EGO_V_GATE_MPS = 2.0;  // approach flicker unaffected
+
+    double last_dist_m = 150.0;
+    bool   latched     = false;
+
+    std::tuple<bool, double, double> update(bool fused_cipo, double fused_dist_m,
+                                            double fused_rel_vel_ms, double ego_v)
+    {
+        if (fused_cipo)
+        {
+            last_dist_m = fused_dist_m;
+            if (latched)
+            {
+                latched = false;
+                VP_INFO("[CIPO-latch] released — target re-confirmed at %.1f m", fused_dist_m);
+            }
+            return {true, fused_dist_m, fused_rel_vel_ms};
+        }
+        if (last_dist_m < LATCH_DIST_M && ego_v < EGO_V_GATE_MPS)
+        {
+            if (!latched)
+            {
+                latched = true;
+                VP_INFO("[CIPO-latch] engaged — holding stopped lead at %.1f m", last_dist_m);
+            }
+            return {true, last_dist_m, -ego_v};  // stopped lead: absolute speed 0
+        }
+        return {false, fused_dist_m, fused_rel_vel_ms};
+    }
+};
 
 int main(int argc, char** argv)
 {
@@ -142,14 +191,18 @@ int main(int argc, char** argv)
 
             // has_cipo: tracker-based — true only when filter tracks a target
             // closer than D_MAX. cipo_raw_found alone must not gate the planner.
+            // The latch keeps a confirmed-close track alive as a stopped lead
+            // when both networks drop it at bumper range (object permanence).
             static constexpr double D_MAX = 150.0;
-            const bool has_cipo = r->cipo.valid && r->cipo.distance_m < D_MAX;
+            static CipoLatch cipo_latch;
+            const bool fused_cipo = r->cipo.valid && r->cipo.distance_m < D_MAX;
+            const auto [has_cipo, cipo_dist, cipo_rel_vel] = cipo_latch.update(
+                fused_cipo, r->cipo.distance_m, r->cipo.velocity_ms, ego_v);
             // CONTRACT: cipo_v is the ABSOLUTE lead speed (m/s). Fusion reports
             // RELATIVE velocity (negative = approaching), so convert at the
             // boundary. speed_limit doubles as the free-road absolute value.
-            const double cipo_v = has_cipo ? std::max(0.0, ego_v + r->cipo.velocity_ms)
+            const double cipo_v = has_cipo ? std::max(0.0, ego_v + cipo_rel_vel)
                                          : cfg.speed_limit;
-            const double cipo_dist = r->cipo.distance_m;
 
             const double raw_cte = r->lateral.path_valid
                                        ? static_cast<double>(r->lateral.raw_cte_m)
@@ -158,7 +211,7 @@ int main(int argc, char** argv)
                 cte, epsi, kappa, ego_v, has_cipo, cipo_v, cipo_dist);
 
             VP_INFO(
-                "plan: tyre=%.4f rad  accel=%.3f m/s²  |  cte=%.2fm(raw=%.2fm) cte_dot=%+.2fm/s  epsi=%.3f epsi_dot=%+.3frad/s  kappa=%.4f  |  cipo=%s  dist=%.1f m  vel=%+.2f m/s",
+                "plan: tyre=%.4f rad  accel=%.3f m/s²  |  cte=%.2fm(raw=%.2fm) cte_dot=%+.2fm/s  epsi=%.3f epsi_dot=%+.3frad/s  kappa=%.4f  |  cipo=%s%s  dist=%.1f m  vel=%+.2f m/s",
                 plan.steering.empty() ? 0.0 : plan.steering[1],
                 plan.acceleration,
                 cte,
@@ -168,8 +221,9 @@ int main(int argc, char** argv)
                 r->lateral.yaw_rate_rps,
                 kappa,
                 has_cipo ? "true" : "false",
+                cipo_latch.latched ? "[LATCH]" : "",
                 cipo_dist,
-                r->cipo.velocity_ms);
+                cipo_rel_vel);
 
             vehicle_interface->write(
                 plan.steering.empty() ? 0.0 : plan.steering[1],
