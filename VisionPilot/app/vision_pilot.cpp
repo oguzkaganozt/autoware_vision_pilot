@@ -50,23 +50,38 @@ struct CipoLatch
 {
     static constexpr double LATCH_DIST_M   = 10.0;
     static constexpr double EGO_V_GATE_MPS = 2.0;  // approach flicker unaffected
+    static constexpr int    RELEASE_FRAMES = 5;    // single-frame ghosts must not release
 
     double last_dist_m = 150.0;
+    double odom_m      = 0.0;   // ego travel integral (self-contained)
+    double latch_odom_m = 0.0;  // odom at last confirm
+    int    confirm_streak = 0;
     bool   latched     = false;
+    std::chrono::steady_clock::time_point last_t = std::chrono::steady_clock::now();
 
     std::tuple<bool, double, double> update(bool fused_cipo, double fused_dist_m,
                                             double fused_rel_vel_ms, double ego_v)
     {
+        const auto now = std::chrono::steady_clock::now();
+        const double dt = std::chrono::duration<double>(now - last_t).count();
+        last_t = now;
+        if (dt > 0.0 && dt < 1.0)
+            odom_m += std::max(0.0, ego_v) * dt;
+
         if (fused_cipo)
         {
-            last_dist_m = fused_dist_m;
-            if (latched)
+            last_dist_m   = fused_dist_m;
+            latch_odom_m  = odom_m;
+            if (++confirm_streak >= RELEASE_FRAMES && latched)
             {
                 latched = false;
                 VP_INFO("[CIPO-latch] released — target re-confirmed at %.1f m", fused_dist_m);
             }
+            // A fresh confirm always wins for the planner; the streak only
+            // gates the latch *release* so flicker cannot drop the coast.
             return {true, fused_dist_m, fused_rel_vel_ms};
         }
+        confirm_streak = 0;
         if (last_dist_m < LATCH_DIST_M && ego_v < EGO_V_GATE_MPS)
         {
             if (!latched)
@@ -74,7 +89,11 @@ struct CipoLatch
                 latched = true;
                 VP_INFO("[CIPO-latch] engaged — holding stopped lead at %.1f m", last_dist_m);
             }
-            return {true, last_dist_m, -ego_v};  // stopped lead: absolute speed 0
+            // Coast: the car may still be rolling when the track drops, so
+            // freeze the *world* point, not the last number — subtract ego
+            // travel since the confirm. Floors at 0.5 m (IDM gap floor).
+            const double coasted = std::max(0.5, last_dist_m - (odom_m - latch_odom_m));
+            return {true, coasted, -ego_v};  // stopped lead: absolute speed 0
         }
         return {false, fused_dist_m, fused_rel_vel_ms};
     }
