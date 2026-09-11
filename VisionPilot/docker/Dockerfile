@@ -14,6 +14,7 @@ ARG ENABLE_OCCUPANCY=OFF
 
 # build
 FROM nvcr.io/nvidia/cuda:${CUDA_TAG} AS builder
+RUN sed -i 's|//archive.ubuntu.com|//mirrors.edge.kernel.org|g; s|//security.ubuntu.com|//mirrors.edge.kernel.org|g' /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list 2>/dev/null || true
 ARG ONNXRUNTIME_VERSION
 ARG ENABLE_ROS2
 ARG ENABLE_OCCUPANCY
@@ -103,6 +104,7 @@ RUN mkdir build && cd build \
 
 # runtime
 FROM nvcr.io/nvidia/cuda:${CUDA_TAG%-devel*}-runtime-ubuntu24.04 AS runtime
+RUN sed -i 's|//archive.ubuntu.com|//mirrors.edge.kernel.org|g; s|//security.ubuntu.com|//mirrors.edge.kernel.org|g' /etc/apt/sources.list.d/ubuntu.sources /etc/apt/sources.list 2>/dev/null || true
 ARG ENABLE_ROS2
 ENV DEBIAN_FRONTEND=noninteractive
 
